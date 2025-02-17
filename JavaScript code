@@ -1,0 +1,177 @@
+import _sodium from 'libsodium-wrappers'; // For signing transactions
+import fetch from 'node-fetch';  // For making HTTP requests
+import { linearRegression } from 'simple-statistics'; // Compute Linear Regression
+
+
+// Defines my private and public keys
+const keypair = {
+  private: "ENTER PRIVATE KEY",
+  public: "ENTER PUBLIC KEY"
+};
+
+
+// Convex Blockchain API endpoint
+const api = "URL/api";
+const addr = 61; // My address on Convex
+
+
+// Sodium library initialization
+(async () => {
+  await _sodium.ready;
+  const sodium = _sodium;
+  console.log("Sodium ready");
+
+
+  // Define the function to fetch market data and compute the gradients
+  async function fetchData() {
+    const api = "URL/api";
+    try {
+      const res = await fetch(`${api}/v1/query`, {
+        method: "POST", // fetches a POST, query
+        body: JSON.stringify({
+          address: addr,
+          source: `#40/snapshots`  // Snapshot of the FT1Coin price from the Convex blockchain
+        })
+      });
+
+
+      if (!res.ok) {
+        console.error(`Error: Received status ${res.status}`); // Returns error message if invalid
+        return;
+      }
+
+
+      const payload = await res.json();
+      const snapshots = payload['value'];
+
+
+      if (!Array.isArray(snapshots)) {
+        console.error('Snapshots is not an array');
+        return;
+      } // Error messages for ease of debugging
+
+
+      // Calculate 72-hour gradient (Long-term trend)
+      const _72hrsAgo = Date.now() - (1000 * 60 * 60 * 72);
+      const last72hrsOfSnapshots = snapshots.filter(snapshot => snapshot['timestamp'] >= _72hrsAgo);
+
+
+      let trend72hr = 0;
+      if (last72hrsOfSnapshots.length > 0) {
+        const xypairs72hr = last72hrsOfSnapshots.map(snapshot => [snapshot['timestamp'], snapshot['market']['price']]);
+        trend72hr = linearRegression(xypairs72hr)['m'];
+        console.log('72-hour gradient:', trend72hr);
+      } else {
+        console.error('No data available for 72-hour gradient calculation');
+      }
+
+
+      // Calculate 1-hour gradient (Short-term trend)
+      const _1hrAgo = Date.now() - (1000 * 60 * 60);
+      const last1hrOfSnapshots = snapshots.filter(snapshot => snapshot['timestamp'] >= _1hrAgo);
+
+
+      let trend1hr = 0;
+      if (last1hrOfSnapshots.length > 0) {
+        const xypairs1hr = last1hrOfSnapshots.map(snapshot => [snapshot['timestamp'], snapshot['market']['price']]);
+        trend1hr = linearRegression(xypairs1hr)['m'];
+        console.log('1-hour gradient:', trend1hr);
+      } else {
+        console.error('No data available for 1-hour gradient calculation');
+      }
+
+
+      // Trading logic based on long-term and short-term trends
+      let tradingSignal = null; // Default: No signal
+
+
+      if (trend72hr > 0 && trend1hr < 0) {
+        // Long-term positive, Short-term negative -> Buy signal
+        tradingSignal = 1;
+        console.log('1');  // For testing or logging
+      } else if (trend72hr < 0 && trend1hr > 0) {
+        // Long-term negative, Short-term positive -> Sell signal
+        tradingSignal = 2;
+        console.log('2');
+      } else {
+        // No action if both trends are the same
+        console.log('No Signal: No action');
+      }
+// Can change the numbers to add more options then change the purchase information
+      // If a trading signal is generated, proceed to place the order
+      if (tradingSignal !== null) {
+        // Example: Placeholder for actual trading logic (e.g., API call to place orders)
+        await placeTradeOrder(tradingSignal);
+      }
+
+
+    } catch (error) {
+      console.error('Error fetching data:', error);
+    }
+  }
+
+
+  // Function to place the trade order based on the signal
+  async function placeTradeOrder(tradingSignal) {
+    const amount = 1000;  // The amount to trade (adjust accordingly)
+
+
+    // Based on buy or sell signals 1 or 2, can change how much to trade by changing the 1 in the source code
+    let source = '';
+    if (tradingSignal === 1) {
+      // Buy signal: prepare buy transaction
+      source = `(torus/buy-tokens FT1Coin 1)`;
+      console.log('Placing Buy Order...');
+    } else if (tradingSignal === 2) {
+      // Sell signal: prepare sell transaction
+      source = `(torus/sell-tokens FT1Coin 1)`;
+      console.log('Placing Sell Order...');
+    } else {
+      console.log('No action for this signal.');
+      return;
+    }
+
+
+    // Prepare the transaction
+    const res = await fetch(`${api}/v1/transaction/prepare`, {
+      method: "POST",
+      body: JSON.stringify({
+        address: addr,
+        source: source  // Dynamic source based on buy or sell signal
+      })
+    });
+    console.log("status", res.status);
+    const payload = await res.json();
+    console.log("payload", payload);
+    const hash = payload.hash;
+    console.log("hash", hash);
+
+
+    // Signing the transaction
+    const keyHex = `${keypair.private}${keypair.public}`;
+    const keyBin = sodium.from_hex(keyHex);
+    const msgBin = sodium.from_hex(hash);
+    const sigBin = sodium.crypto_sign_detached(msgBin, keyBin);
+    const sigHex = sodium.to_hex(sigBin);
+    console.log("sigHex", sigHex);
+
+
+    // Submiting the signed transaction
+    const submitRes = await fetch(`${api}/v1/transaction/submit`, {
+      method: "POST",
+      body: JSON.stringify({
+        address: addr,
+        accountKey: keypair.public,
+        hash: hash,
+        sig: sigHex
+      })
+    });
+    console.log("status", submitRes.status);
+    const submitPayload = await submitRes.json();
+    console.log("submitPayload", submitPayload);
+  }
+
+
+  // Set interval to fetch data and place trade orders every x seconds (*1000 for milliseconds)
+  setInterval(fetchData, 15000);
+})();
